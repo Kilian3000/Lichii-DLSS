@@ -8,6 +8,13 @@ Builds are available under this fork's Releases. NVIDIA runtime/model files are 
 this repository does not provide games, keys, firmware or user data. DLSS works only with supported
 game upscaling passes. Optional neural rendering is disabled by default.
 
+The [Batocera integration and usage guide](batocera/README.md) adds a third per-game
+emulator choice, a separate settings shortcut and updater, shared saves and controller
+preferences, and independent graphics settings/caches. On 21 November 2026, revision 2
+passed its RTX 4070 SUPER NGX smoke test and ran Ocarina with native DLSS Quality
+at 1920×1080 → 2560×1440, using an existing save. This is an experimental port;
+support and image quality vary by game, and unknown shader compilation can still stutter.
+
 For later updates, run **Actions → Build Batocera DLSS** with **Merge a newer official Lichii release**
 enabled and an official `build-N` tag or `latest`. Merge conflicts, failed builds or failed tests stop
 publication, preserving the previously published working package. A successful build records its

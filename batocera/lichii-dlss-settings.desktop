@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Lichii DLSS Settings
+Comment=Configure the experimental Linux DLSS emulator
+Type=Application
+Exec=/userdata/system/lichii/launch.sh --emulator lichii-dlss --settings
+Icon=/userdata/system/lichii/lichii.png
+Terminal=false
+Categories=Game;batocera.linux;
