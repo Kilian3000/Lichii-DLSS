@@ -40,6 +40,37 @@ Obtain the Linux library and its license from NVIDIA and place them in the separ
 profile's `data/lichii/ngx` directory. The installed NVIDIA driver must also provide
 its NGX core library. Optional neural rendering remains Off; no model is required.
 
+## Optional neural rendering
+
+The per-game frontend menu offers neural Off/Standard/Natural/Cinematic, DLSS quality
+and effect strength. The launcher uses `batocera-renderer.py` to resolve Batocera's
+normal global → system → folder → game precedence. Only explicitly selected values
+temporarily override the experimental renderer profile, including existing per-game
+inheritance flags; shutdown restores the previous values while retaining controller
+changes and unrelated settings. A recovery file also handles an interrupted session
+on the next launch. Auto leaves the emulator's own preferences in effect when no
+inherited frontend choice exists. F1 settings remain available for live comparisons.
+
+The tested model source is NVIDIA's official [RTX Remix 1.6.1 x64 package](https://github.com/NVIDIAGameWorks/rtx-remix/releases/tag/remix-1.6.1):
+
+- Archive SHA256: `7dd1d44492a609050e44b0e3581cec31135d1ed88b4a91123b4faae91955716a`.
+- `nvngx_dlssnr.dll` SHA256: `2bc19bc09a7b89dd44f73e2ac0108fcc586e2154bdd0830f242f4f040e28789f`,
+  matching NVIDIA's release CRC/SHA manifest.
+- Its `WEIGHTS_HT` resource matches the supported 310.8.0 model's resource SHA256
+  `836f445d06ecd2e59bb9f17b84b91c143396fd76ccda1c9dc7fe81d5edd548f4`.
+
+`import-neural-model.py` extracts only that verified resource from this newer DLL,
+without loading executable code, and reproduces the native importer's packed-weight
+and tensor-table hashes. It does not import the additional newer/smaller model.
+Obtain the NVIDIA archive yourself, verify its published hashes, extract the DLL,
+then run the script with the DLL and a new destination `profile/data/lichii/ngx/nr/310.8.0`.
+The weights, DLL, licenses and source archive stay on the user's PC.
+
+Run `python3 batocera/test-batocera-renderer.py` when changing this integration or
+updating the underlying settings enums. Tests cover frontend precedence, preference
+restoration, interrupted-session recovery, and enum compatibility with the emulator.
+The optional GPU smoke command is documented in `docs/user/DLSSLinux.md`.
+
 ## Building and maintaining the fork
 
 Use **Actions → Build Batocera DLSS → Run workflow**. To incorporate a newer official

@@ -40,7 +40,7 @@ for name, path in destinations.items():
     assert path.read_text() == baseline[name], f'{name} changed since setup; merge it before installing'
 for name in ('launch.sh','update-emulators.sh'):
     subprocess.run(['bash','-n',str(setup/name)],check=True)
-for name in ('update-emulators.py','sync-controller-config.py'):
+for name in ('update-emulators.py','sync-controller-config.py','batocera-renderer.py'):
     compile((setup/name).read_text(),str(setup/name),'exec')
 systems = ET.parse(setup/'es_systems_switch2.cfg')
 assert [x.attrib['name'] for x in systems.findall('system/emulators/emulator')] == ['lichii','eglantine','lichii-dlss']
@@ -73,6 +73,7 @@ def install(source, destination, mode):
 for name,path in destinations.items():
     install(setup/name,path,0o755 if name.endswith(('.sh','.py')) else 0o644)
 install(setup/'sync-controller-config.py',normal/'sync-controller-config.py',0o755)
+install(setup/'batocera-renderer.py',normal/'batocera-renderer.py',0o755)
 install(setup/'lichii-dlss-settings.desktop',Path('/userdata/system/.local/share/applications/lichii-dlss-settings.desktop'),0o644)
 assert digest(normal_binary) == normal_sha and digest(other) == other_sha
 assert (base/'profile/data/lichii/nand').resolve() == (normal/'profile/data/lichii/nand').resolve()

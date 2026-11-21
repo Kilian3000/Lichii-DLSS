@@ -58,6 +58,8 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch --filter=blob:none https://github.com/zortos293/Lichii.git "refs/tags/$ref"
           git merge --no-ff --no-edit FETCH_HEAD
+      - name: Validate Batocera settings and emulator enum compatibility
+        run: python3 batocera/test-batocera-renderer.py
       - name: Set build identity
         run: |
           set -euo pipefail

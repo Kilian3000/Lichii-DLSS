@@ -50,10 +50,12 @@ controller_family="$emulator"
 normal_config="$common_dir/profile/config/lichii/qt-config.ini"
 sync_shared_controls_back() {
     if [[ "$emulator" == lichii-dlss ]]; then
+        python3 "$common_dir/batocera-renderer.py" restore "$XDG_CONFIG_HOME/lichii"
         python3 "$common_dir/sync-controller-config.py" "$config_file" "$normal_config"
     fi
 }
 if [[ "$emulator" == lichii-dlss ]]; then
+    python3 "$common_dir/batocera-renderer.py" restore "$XDG_CONFIG_HOME/lichii"
     python3 "$common_dir/sync-controller-config.py" "$normal_config" "$config_file"
     controller_family=lichii
     trap sync_shared_controls_back EXIT
@@ -72,6 +74,8 @@ case "${1:-}" in
     *) printf 'The emulator expects a game in %s\n' "$rom_dir" >&2; exit 2 ;;
 esac
 
+settings_rom="$rom"
+
 if [[ -d "$rom" ]]; then
     if [[ -f "$rom/exefs/main" && -f "$rom/exefs/main.npdm" ]]; then
         rom="$rom/exefs/main"
@@ -85,6 +89,10 @@ fi
 if [[ ! -f "$rom" ]]; then
     printf 'Game file is missing: %s\n' "$rom" >&2
     exit 2
+fi
+
+if [[ "$emulator" == lichii-dlss ]]; then
+    python3 "$common_dir/batocera-renderer.py" apply "$XDG_CONFIG_HOME/lichii" "$settings_rom"
 fi
 
 cursor_shown=false

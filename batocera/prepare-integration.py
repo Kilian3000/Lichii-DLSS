@@ -13,10 +13,12 @@ new = '''controller_family="$emulator"
 normal_config="$common_dir/profile/config/lichii/qt-config.ini"
 sync_shared_controls_back() {
     if [[ "$emulator" == lichii-dlss ]]; then
+        python3 "$common_dir/batocera-renderer.py" restore "$XDG_CONFIG_HOME/lichii"
         python3 "$common_dir/sync-controller-config.py" "$config_file" "$normal_config"
     fi
 }
 if [[ "$emulator" == lichii-dlss ]]; then
+    python3 "$common_dir/batocera-renderer.py" restore "$XDG_CONFIG_HOME/lichii"
     python3 "$common_dir/sync-controller-config.py" "$normal_config" "$config_file"
     controller_family=lichii
     trap sync_shared_controls_back EXIT
@@ -30,6 +32,16 @@ old = '''    if "$cursor_shown"; then
 }'''
 assert old in launch
 launch = launch.replace(old,old[:-1]+'    sync_shared_controls_back\n}')
+old = 'if [[ -d "$rom" ]]; then'
+assert old in launch
+launch = launch.replace(old, 'settings_rom="$rom"\n\n'+old)
+old = 'cursor_shown=false\nhotkeys_set=false'
+assert old in launch
+launch = launch.replace(old, '''if [[ "$emulator" == lichii-dlss ]]; then
+    python3 "$common_dir/batocera-renderer.py" apply "$XDG_CONFIG_HOME/lichii" "$settings_rom"
+fi
+
+'''+old)
 (root/'launch.sh').write_text(launch)
 
 updater = baseline['update-emulators.py']
@@ -72,7 +84,25 @@ ET.SubElement(ET.SubElement(entry,'cores'),'core',default='true').text = 'lichii
 ET.indent(systems,space='  ')
 (root/'es_systems_switch2.cfg').write_text('<?xml version="1.0" encoding="UTF-8"?>\n'+ET.tostring(systems,encoding='unicode')+'\n')
 features = ET.fromstring(baseline['es_features_switch2.cfg'])
-ET.SubElement(features,'emulator',name='lichii-dlss',features='')
+dlss = ET.SubElement(features,'emulator',name='lichii-dlss',features='')
+style = ET.SubElement(dlss, 'feature', name='DLSS NEURAL RENDERING',
+                      value='lichii_dlss_neural',
+                      description='AI lighting and detail enhancement. Off keeps ordinary DLSS and frees neural GPU resources. Auto uses the emulator settings. Applies on the next game launch.')
+for label, value in [('Off (ordinary DLSS)', 'off'), ('Standard', 'standard'),
+                     ('Natural', 'natural'), ('Cinematic', 'cinematic')]:
+    ET.SubElement(style, 'choice', name=label, value=value)
+quality = ET.SubElement(dlss, 'feature', name='DLSS QUALITY MODE',
+                        value='lichii_dlss_quality',
+                        description='Game resolution follows the game target. Native DLAA keeps the render resolution and can reduce neural GPU work. Other modes depend on game support.')
+for label, value in [('Game resolution', 'game'), ('Native DLAA', 'native'),
+                     ('Quality', 'quality'), ('Balanced', 'balanced'),
+                     ('Performance', 'performance'), ('Ultra Performance', 'ultra')]:
+    ET.SubElement(quality, 'choice', name=label, value=value)
+strength = ET.SubElement(dlss, 'feature', name='NEURAL EFFECT STRENGTH',
+                         value='lichii_dlss_neural_strength',
+                         description='Blend the neural look with ordinary DLSS. Lower strength does not reduce GPU work; select Neural Rendering Off to recover performance.')
+for value in ('25', '50', '75', '100'):
+    ET.SubElement(strength, 'choice', name=value+'%', value=value)
 ET.indent(features,space='  ')
 (root/'es_features_switch2.cfg').write_text('<?xml version="1.0" encoding="UTF-8"?>\n'+ET.tostring(features,encoding='unicode')+'\n')
 (root/'lichii-dlss-settings.desktop').write_text('''[Desktop Entry]

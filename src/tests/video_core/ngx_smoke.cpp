@@ -122,8 +122,16 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
     static VkExtent2D observed_depth_extent;
     static VkExtent2D observed_render_extent;
     static VkOffset2D observed_depth_base;
-    static bool reset_ngx_for_comparison;
+    static bool use_neural_fixture;
+    static VkClearColorValue neural_fixture;
+    static const vk::DeviceDispatch* fixture_dispatch;
+    use_neural_fixture = expect_neural;
+    fixture_dispatch = &device.GetDispatchLoader();
     forward_evaluate = evaluate;
+    if (use_neural_fixture) {
+        std::puts("NR control checks use fixed scene pixels after successful NGX evaluation; "
+                  "run without a model argument to validate real SR output/history.");
+    }
     const auto observe_evaluate = [](VkCommandBuffer command, const NVSDK_NGX_Handle* feature,
                                      const NVSDK_NGX_Parameter* parameters,
                                      PFN_NVSDK_NGX_ProgressCallback progress) {
@@ -142,13 +150,41 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         parameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &base_x);
         parameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &base_y);
         observed_depth_base = {static_cast<int>(base_x), static_cast<int>(base_y)};
-        // Reset only NGX for comparisons that require the same scene input to NR. Its
-        // temporal reconstruction otherwise differs across the resize/Off/HDR sequence.
-        // Inputs::reset stays untouched: NR must still detect style/control changes itself.
-        if (reset_ngx_for_comparison) {
-            const_cast<NVSDK_NGX_Parameter*>(parameters)->Set(NVSDK_NGX_Parameter_Reset, 1);
+        const auto result = forward_evaluate(command, feature, parameters, progress);
+        if (NVSDK_NGX_FAILED(result) || !use_neural_fixture) {
+            return result;
         }
-        return forward_evaluate(command, feature, parameters, progress);
+        // NR reset/blend comparisons require identical input pixels, independent of NGX
+        // history or feature recreation. Replace only successful SR output with the known
+        // fixture in model-enabled runs. The no-model run checks real SR pixels/history.
+        // Inputs::reset stays untouched: NR must detect style/control changes itself.
+        resource = nullptr;
+        parameters->Get(NVSDK_NGX_Parameter_Output, &resource);
+        const auto* output = static_cast<const NVSDK_NGX_Resource_VK*>(resource);
+        if (!output || output->Type != NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW) {
+            return NVSDK_NGX_Result_FAIL_InvalidParameter;
+        }
+        const auto& image = output->Resource.ImageViewInfo;
+        VkImageMemoryBarrier barrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image.Image,
+            .subresourceRange = image.SubresourceRange,
+        };
+        fixture_dispatch->vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        fixture_dispatch->vkCmdClearColorImage(command, image.Image, VK_IMAGE_LAYOUT_GENERAL,
+                                               &neural_fixture, 1, &image.SubresourceRange);
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        fixture_dispatch->vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        return result;
     };
     SCOPE_EXIT {
         api.create = create;
@@ -214,8 +250,6 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         observed_depth_extent = {};
         observed_render_extent = {};
         observed_depth_base = {-1, -1};
-        reset_ngx_for_comparison = expect_neural &&
-            (frame == 2 || frame == 6 || frame == 9 || frame == 12 || frame == 16 || frame == 18);
         api.evaluate = observe_evaluate;
         if (inject_failure) {
             api.evaluate = [](VkCommandBuffer, const NVSDK_NGX_Handle *,
@@ -227,6 +261,7 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         const std::array<float, 4> expected = frame == 14 ? std::array{2.0f, 0.25f, 0.5f, 1.0f}
                                             : hdr ? std::array{0.75f, 0.25f, 0.5f, 1.0f}
                                                   : std::array{0.25f, 0.5f, 0.75f, 1.0f};
+        std::copy(expected.begin(), expected.end(), neural_fixture.float32);
         scheduler.Record([&, frame, expected](vk::CommandBuffer cmd) {
             for (const auto &image : {color.resource, depth.resource, motion.resource}) {
                 cmd.PipelineBarrier(
@@ -358,7 +393,7 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
                 if (difference >= 0.001) {
                     std::fprintf(stderr,
                         "NR reset mismatch: frame %zu channel %zu actual %.8f reference %.8f "
-                        "difference %.8f (NGX reset only)\n",
+                        "difference %.8f (fixed NR input)\n",
                         frame, c, sums[c] / pixels, natural_reset[c], difference);
                 }
                 Require(difference < 0.001,
@@ -370,7 +405,7 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
                 if (difference >= 0.003) {
                     std::fprintf(stderr,
                         "NR blend mismatch: frame %zu channel %zu actual %.8f expected %.8f "
-                        "difference %.8f (fresh NR, NGX reset only)\n",
+                        "difference %.8f (fresh NR, fixed input)\n",
                         frame, c, sums[c] / pixels, halfway, difference);
                 }
                 Require(difference < 0.003,

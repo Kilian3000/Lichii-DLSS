@@ -49,6 +49,39 @@ over 1,500 successful native DLSS evaluations at 1920x1080 -> 2560x1440, Quality
 This confirms working upscaling; image-quality and smoothness preferences still
 need a personal comparison. DLSS does not precompile unknown game shaders.
 
+Per-game neural rendering and comparison
+
+With lichii-dlss selected, Advanced Game Options now includes:
+  DLSS NEURAL RENDERING: Off (ordinary DLSS), Standard, Natural or Cinematic.
+  DLSS QUALITY MODE: Game resolution, Native DLAA, Quality, Balanced,
+                     Performance or Ultra Performance.
+  NEURAL EFFECT STRENGTH: 25%, 50%, 75% or 100%.
+Auto inherits the usual Batocera system/folder choices, then the emulator settings.
+Changes in Batocera apply the next time the game starts. The same neural options
+can also be changed live in Lichii's Graphics settings with Apply / OK.
+
+Off releases the neural resources and retains ordinary DLSS. Lower effect strength
+only blends the picture: it does not reduce the model's processing cost.
+Native DLAA processes the game's render resolution rather than upscaling first;
+this can reduce neural GPU work. Other quality modes depend on the game's sizes
+and can fall back automatically when unsupported.
+
+On the RTX 4070 SUPER, brief Ocarina Hyrule Field measurements were approximately
+52 FPS with ordinary DLSS, 30 FPS with Natural at 1440p, and 37 FPS with Natural
+at 1080p Native DLAA. These are scene-dependent samples. Choose the look and
+smoothness you prefer; neural rendering does not remove shader compilation pauses.
+
+The global neural default is Off. Per-game Batocera choices temporarily override
+only the selected renderer settings. The launcher restores the emulator's own
+preferences after exit, and recovers an interrupted override on its next launch.
+Normal Lichii, saves and controller preferences are not replaced by these options.
+
+The installed neural model was extracted locally from NVIDIA's official RTX Remix
+1.6.1 x64 package. Its existing 310.8.0 WEIGHTS_HT resource, packed weights and
+tensor table were verified against the native Lichii importer's hashes. The DLL
+is never executed by the importer, and neither DLL nor weights are redistributed
+in this fork. Model provenance and test results are under /userdata/system/lichii-dlss.
+
 Updates and rollback
 
 Normal Lichii keeps its usual official automatic updates. The experimental build
