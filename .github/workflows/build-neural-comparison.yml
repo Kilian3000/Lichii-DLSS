@@ -2,6 +2,12 @@ name: Build standalone neural image comparison
 
 on:
   workflow_dispatch:
+    inputs:
+      tool:
+        description: Standalone diagnostic to build (no emulator release)
+        type: choice
+        options: [benchmark, styles]
+        default: benchmark
 
 permissions:
   contents: read
@@ -36,7 +42,12 @@ jobs:
             sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang-23 lld-23
+      - name: Select standalone benchmark diagnostic
+        if: inputs.tool == 'benchmark'
+        run: |
+          cp batocera/neural_image_benchmark.cpp src/tests/video_core/neural_rendering_smoke.cpp
       - name: Add strength comparisons to the diagnostic tool only
+        if: inputs.tool == 'styles'
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -80,20 +91,66 @@ jobs:
       - name: Build comparison tool only
         run: cmake --build build/neural-comparison --target neural_rendering_smoke --parallel 4
       - name: Package tool and usage information
+        env:
+          COMPARISON_TOOL: ${{ inputs.tool }}
         run: |
           set -euo pipefail
           mkdir -p out/neural-comparison
-          install -m 755 build/neural-comparison/bin/neural_rendering_smoke out/neural-comparison/
-          ldd out/neural-comparison/neural_rendering_smoke | tee out/neural-comparison/DEPENDENCIES.txt
+          if [ "$COMPARISON_TOOL" = benchmark ]; then
+            tool_name=neural_image_benchmark
+          elif [ "$COMPARISON_TOOL" = styles ]; then
+            tool_name=neural_rendering_smoke
+          else
+            echo 'Unknown comparison tool' >&2
+            exit 1
+          fi
+          install -m 755 build/neural-comparison/bin/neural_rendering_smoke "out/neural-comparison/$tool_name"
+          ldd "out/neural-comparison/$tool_name" | tee out/neural-comparison/DEPENDENCIES.txt
           if grep -q 'not found' out/neural-comparison/DEPENDENCIES.txt; then exit 1; fi
           status=0
-          out/neural-comparison/neural_rendering_smoke > out/neural-comparison/USAGE.txt 2>&1 || status=$?
+          "out/neural-comparison/$tool_name" > out/neural-comparison/USAGE.txt 2>&1 || status=$?
           test "$status" -eq 2
           printf 'Source commit: %s\nWorkflow: %s/actions/runs/%s\n' \
             "$GITHUB_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
             > out/neural-comparison/BUILD.txt
           sha256sum src/tests/video_core/neural_rendering_smoke.cpp >> out/neural-comparison/BUILD.txt
-          cat > out/neural-comparison/README.txt <<'EOF'
+          if [ "$COMPARISON_TOOL" = benchmark ]; then
+            cat > out/neural-comparison/README.txt <<'EOF'
+          Offline native NR resolution and multipass benchmark (Linux x86_64)
+
+          Run locally on the target GPU (Vulkan index 0 shown):
+            DLSS5VK_DEVICE_INDEX=0 ./neural_image_benchmark MODEL IMAGE.rgba32f WIDTH HEIGHT OUTPUT_PREFIX PASSES [REPEATS=5]
+
+          MODEL is the imported 310.8.0 folder with manifest.json and model/packed.bin.
+          IMAGE must be top-down, tightly packed little-endian RGBA float32 of exactly
+          WIDTH * HEIGHT * 16 bytes. Keep SDR display-code RGB values without converting
+          to linear light; alpha is normally 1.0. The output parent must already exist.
+          PASSES is 1..8; REPEATS is 1..100 (default 5). Device dimensions must be supported.
+
+          Natural, strength/tone/structure 100% only. One model/backend workspace is reused.
+          One warmup chain is discarded, then REPEATS chains are measured. Each chain
+          restores the same original GPU image once, outside timing. Later passes consume
+          the previous pass's output without restoring the source. Every pass resets NR
+          history and uses a separate waited submission. No image/model data is uploaded.
+
+          Only OUTPUT_PREFIX.rgba16f (the final measured chain's full-resolution result)
+          and OUTPUT_PREFIX.json (device, dimensions, chain/per-pass median/min/max and
+          individual timing samples) are written. RGBA16F is little-endian, with no header.
+          Resize final results to a common display size separately for visual comparison.
+          Nonfinite output, kernel timeouts, and validation errors fail the diagnostic.
+
+          Timings sum per-pass GPU timestamps for NR preprocessing, inference, compositing,
+          and its output copy. They exclude model initialization, CPU submission/waits,
+          source upload, readback, emulator rendering and presentation. They are not a
+          live-game FPS estimate. This is an offline fresh-history still-image preview;
+          live multipass processing may require separate per-pass temporal histories.
+
+          No emulator/profile settings or production code are changed. The artifact needs
+          the NVIDIA Vulkan driver and libraries listed in DEPENDENCIES.txt. Build/source
+          provenance is in BUILD.txt. No emulator release/update is published.
+          EOF
+          else
+            cat > out/neural-comparison/README.txt <<'EOF'
           Standalone native neural image comparison (Linux x86_64)
 
           This diagnostic tool uses Lichii's native NR backend. It does not launch an
@@ -129,6 +186,8 @@ jobs:
           The workflow adds the three strength cases only to its temporary diagnostic
           source. Production runtime code is unchanged. It publishes no emulator release.
           EOF
+          fi
+          printf 'Diagnostic mode: %s\n' "$COMPARISON_TOOL" >> out/neural-comparison/BUILD.txt
           cp externals/opendlss-nr/NOTICE out/neural-comparison/NOTICE.txt
           cp externals/opendlss-nr/LICENSE out/neural-comparison/OpenDLSS-NR-LICENSE.txt
           cp externals/opendlss-nr/volk/LICENSE.md out/neural-comparison/Volk-LICENSE.txt
@@ -138,7 +197,7 @@ jobs:
       - name: Upload standalone tool
         uses: actions/upload-artifact@v7
         with:
-          name: neural-comparison-linux-x86_64
+          name: neural-${{ inputs.tool }}-linux-x86_64
           path: |
             out/neural-comparison-linux-x86_64.tar.gz
             out/neural-comparison-linux-x86_64.sha256
