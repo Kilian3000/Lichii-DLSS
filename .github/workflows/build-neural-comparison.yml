@@ -1,0 +1,146 @@
+name: Build standalone neural image comparison
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neural-comparison-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install headless build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev mesa-common-dev nasm ninja-build \
+            libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev \
+            libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev libopus-dev \
+            libasound2-dev libssl-dev pipx
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' |
+            sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-23 lld-23
+      - name: Add strength comparisons to the diagnostic tool only
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/tests/video_core/neural_rendering_smoke.cpp')
+          text = path.read_text()
+          replacements = [
+              ('auto evaluate = [&](NR::Style style, bool reset, bool wait) {',
+               'auto evaluate = [&](NR::Style style, bool reset, bool wait, float intensity = 1.0f) {'),
+              ('                frame.style = style;\n',
+               '                frame.style = style;\n                frame.intensity = intensity;\n'),
+              ('        }\n        vkDestroyQueryPool(context.device(), queries, nullptr);',
+               '''            for (const int strength : {25, 50, 75}) {
+                          evaluate(NR::Style::Natural, true, true, strength / 100.0f);
+                          download("-natural-strength" + std::to_string(strength));
+                          std::printf("Natural strength=%d reset=PASS\\n", strength);
+                          std::fflush(stdout);
+                      }
+                  }
+                  vkDestroyQueryPool(context.device(), queries, nullptr);'''),
+          ]
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit('Diagnostic source changed; review the comparison adaptation')
+              text = text.replace(old, new)
+          path.write_text(text)
+          PY
+      - name: Configure without emulator frontends
+        run: |
+          cmake -S . -B build/neural-comparison -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
+            '-DCMAKE_EXE_LINKER_FLAGS=-B/usr/lib/llvm-23/bin -fuse-ld=lld' \
+            -DENABLE_QT=OFF -DLICHII_CMD=OFF \
+            -DLICHII_ROOM=OFF -DLICHII_ROOM_STANDALONE=OFF \
+            -DBUILD_TESTING=ON -DLICHII_TESTS=ON -DDYNARMIC_TESTS=OFF \
+            -DLICHII_USE_BUNDLED_SDL3=ON -DLICHII_USE_BUNDLED_OPENSSL=OFF \
+            -DOpenSSL_FORCE_SYSTEM=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DENABLE_NVIDIA_DLSS=ON -DENABLE_UPDATE_CHECKER=OFF \
+            -DUSE_DISCORD_PRESENCE=OFF
+      - name: Build comparison tool only
+        run: cmake --build build/neural-comparison --target neural_rendering_smoke --parallel 4
+      - name: Package tool and usage information
+        run: |
+          set -euo pipefail
+          mkdir -p out/neural-comparison
+          install -m 755 build/neural-comparison/bin/neural_rendering_smoke out/neural-comparison/
+          ldd out/neural-comparison/neural_rendering_smoke | tee out/neural-comparison/DEPENDENCIES.txt
+          if grep -q 'not found' out/neural-comparison/DEPENDENCIES.txt; then exit 1; fi
+          status=0
+          out/neural-comparison/neural_rendering_smoke > out/neural-comparison/USAGE.txt 2>&1 || status=$?
+          test "$status" -eq 2
+          printf 'Source commit: %s\nWorkflow: %s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            > out/neural-comparison/BUILD.txt
+          sha256sum src/tests/video_core/neural_rendering_smoke.cpp >> out/neural-comparison/BUILD.txt
+          cat > out/neural-comparison/README.txt <<'EOF'
+          Standalone native neural image comparison (Linux x86_64)
+
+          This diagnostic tool uses Lichii's native NR backend. It does not launch an
+          emulator or change any emulator profile. No model or image is included.
+          Model and image processing happen locally on the machine running the tool.
+          Requires the NVIDIA Vulkan driver and libraries listed in DEPENDENCIES.txt.
+
+          Run on the target GPU (Vulkan index 0 shown):
+            DLSS5VK_DEVICE_INDEX=0 ./neural_rendering_smoke MODEL IMAGE.rgba32f WIDTH HEIGHT OUTPUT_PREFIX
+
+          MODEL is the locally imported 310.8.0 model directory containing manifest.json
+          and model/packed.bin. IMAGE is top-down, tightly packed little-endian RGBA
+          float32, four channels per pixel. For an SDR screenshot, keep its 0..1 display
+          code values without converting to linear light. Alpha is normally 1.0.
+          WIDTH and HEIGHT must match the input exactly. OUTPUT_PREFIX's parent must exist.
+
+          All styles use that same input image. Outputs are little-endian RGBA float16
+          at the original dimensions, with no headers:
+            -style0-first/history/reset.rgba16f : Standard, 100% strength
+            -style1-first/history/reset.rgba16f : Natural, 100% strength
+            -style2-first/history/reset.rgba16f : Cinematic, 100% strength
+            -natural-strength25.rgba16f        : Natural, 25% strength, fresh history
+            -natural-strength50.rgba16f        : Natural, 50% strength, fresh history
+            -natural-strength75.rgba16f        : Natural, 75% strength, fresh history
+
+          Use the first/reset images for a fair fresh-history style/strength comparison.
+          History images show eight further evaluations of the same stationary image.
+          Tone and structure stay at 100%. Strength is passed to the real GPU backend,
+          not applied by a separate image editor. Reset repeatability and finite output
+          are checked by the diagnostic; a nonzero exit means validation failed.
+          This does not test game motion or establish gameplay performance.
+
+          The workflow adds the three strength cases only to its temporary diagnostic
+          source. Production runtime code is unchanged. It publishes no emulator release.
+          EOF
+          cp externals/opendlss-nr/NOTICE out/neural-comparison/NOTICE.txt
+          cp externals/opendlss-nr/LICENSE out/neural-comparison/OpenDLSS-NR-LICENSE.txt
+          cp externals/opendlss-nr/volk/LICENSE.md out/neural-comparison/Volk-LICENSE.txt
+          cp LICENSE.txt out/neural-comparison/LICENSE.txt
+          tar -czf out/neural-comparison-linux-x86_64.tar.gz -C out/neural-comparison .
+          (cd out && sha256sum neural-comparison-linux-x86_64.tar.gz > neural-comparison-linux-x86_64.sha256)
+      - name: Upload standalone tool
+        uses: actions/upload-artifact@v7
+        with:
+          name: neural-comparison-linux-x86_64
+          path: |
+            out/neural-comparison-linux-x86_64.tar.gz
+            out/neural-comparison-linux-x86_64.sha256
+          if-no-files-found: error
+          retention-days: 7
