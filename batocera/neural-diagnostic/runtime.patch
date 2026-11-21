@@ -1,0 +1,360 @@
+--- a/src/video_core/neural_rendering/backend.h
++++ b/src/video_core/neural_rendering/backend.h
+@@ -19,6 +19,7 @@
+     float structure = 1.0f;
+     std::array<float, 2> motion_scale{};  // Stored motion vector to UV offset.
+     std::array<float, 2> motion_jitter{}; // Motion sampling offset in output pixels.
++    bool auto_mask = true; // Diagnostic artifact only; production default preserved.
+     bool reset = false;
+     bool hdr = false;
+ };
+--- a/src/video_core/neural_rendering/backend.cpp
++++ b/src/video_core/neural_rendering/backend.cpp
+@@ -79,6 +79,7 @@
+     Style previous_style{};
+     float previous_tone{}, previous_structure{};
+     bool previous_hdr{};
++    bool previous_auto_mask = true;
+ 
+     /// Wait for GPU use and destroy backend resources; the caller must hold device queue
+     /// synchronization.
+@@ -347,13 +348,15 @@
+     const uint32_t h = state.frames & 1u;
+     const bool reset = frame.reset || !state.history_valid || frame.style != state.previous_style ||
+                        frame.tone != state.previous_tone ||
+-                       frame.structure != state.previous_structure || frame.hdr != state.previous_hdr;
++                       frame.structure != state.previous_structure || frame.hdr != state.previous_hdr ||
++                       frame.auto_mask != state.previous_auto_mask;
+     Params params{};
+     params.full_width = state.geometry.fullWidth;
+     params.full_height = state.geometry.fullHeight;
+     params.width = params.source_width = state.extent.width;
+     params.height = params.source_height = state.extent.height;
+-    params.auto_mask = params.paper_white = params.color_strength = 1.0f;
++    params.auto_mask = frame.auto_mask ? 1.0f : 0.0f;
++    params.paper_white = params.color_strength = 1.0f;
+     params.intensity = frame.intensity;
+     params.tone = frame.tone;
+     params.structure = frame.structure;
+@@ -393,6 +396,7 @@
+     state.previous_tone = frame.tone;
+     state.previous_structure = frame.structure;
+     state.previous_hdr = frame.hdr;
++    state.previous_auto_mask = frame.auto_mask;
+     ++state.frames;
+ }
+ 
+--- a/src/video_core/renderer_vulkan/vk_nvidia_dlss.h
++++ b/src/video_core/renderer_vulkan/vk_nvidia_dlss.h
+@@ -9,6 +9,7 @@
+ #include <atomic>
+ #include <memory>
+ #include <optional>
++#include <vector>
+ 
+ #include "common/common_types.h"
+ #include "common/settings_enums.h"
+@@ -104,6 +105,15 @@
+     MemoryAllocator &memory_allocator;
+ #ifdef EGLANTINE_NGX
+     void PrepareNeuralRendering(const Inputs& inputs, bool requested);
++    void ResetNeuralRendering(); // Call only after draining GPU work under submit_mutex.
++    void CreateDiagnosticImage(VkExtent2D extent);
++    std::vector<std::unique_ptr<VideoCore::NeuralRendering::Backend>> neural_extra_passes;
++    vk::Image neural_image;
++    vk::ImageView neural_view;
++    VkExtent2D neural_extent{};
++    u64 neural_diagnostic_frames{};
++    u64 neural_diagnostic_checks{};
++    bool neural_image_initialized{};
+     std::unique_ptr<VideoCore::NeuralRendering::Backend> neural_rendering;
+     VkImageView neural_motion_view{};
+     bool neural_requested{};
+--- a/src/video_core/renderer_vulkan/vk_ngx_dlss.cpp
++++ b/src/video_core/renderer_vulkan/vk_ngx_dlss.cpp
+@@ -12,6 +12,8 @@
+ #include "video_core/dlss_mode.h"
+ #include "video_core/renderer_base.h"
+ #include "video_core/neural_rendering/backend.h"
++#include "video_core/neural_rendering/diagnostic_options.h"
++#include "video_core/vulkan_common/vulkan_memory_allocator.h"
+ #include "video_core/neural_rendering/model.h"
+ #include "video_core/neural_rendering/runtime.h"
+ #include "video_core/renderer_vulkan/vk_nvidia_dlss.h"
+@@ -118,6 +120,42 @@
+             .subresourceRange = range};
+ }
+ 
++void DiagnosticTransition(vk::CommandBuffer commands, VkImage image, VkImageLayout before,
++                          VkImageLayout after) {
++    commands.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, VkImageMemoryBarrier{
++            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++            .pNext = nullptr,
++            .srcAccessMask = before == VK_IMAGE_LAYOUT_UNDEFINED ? 0u :
++                VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
++            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
++            .oldLayout = before, .newLayout = after,
++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .image = image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}});
++}
++
++void DiagnosticBlit(vk::CommandBuffer commands, VkImage source, VkExtent2D source_extent,
++                    VkImage target, VkExtent2D target_extent) {
++    DiagnosticTransition(commands, source, VK_IMAGE_LAYOUT_GENERAL,
++                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++    DiagnosticTransition(commands, target, VK_IMAGE_LAYOUT_GENERAL,
++                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    const VkImageBlit region{
++        .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++        .srcOffsets = {{0, 0, 0}, {static_cast<int32_t>(source_extent.width),
++                                  static_cast<int32_t>(source_extent.height), 1}},
++        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++        .dstOffsets = {{0, 0, 0}, {static_cast<int32_t>(target_extent.width),
++                                  static_cast<int32_t>(target_extent.height), 1}}};
++    commands.BlitImage(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                      target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region, VK_FILTER_LINEAR);
++    DiagnosticTransition(commands, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                         VK_IMAGE_LAYOUT_GENERAL);
++    DiagnosticTransition(commands, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                         VK_IMAGE_LAYOUT_GENERAL);
++}
++
+ } // namespace
+ 
+ /// Initialize the native NGX upscaler; NGX must already be available.
+@@ -136,7 +174,7 @@
+     // Renderer shutdown has already stopped recording; do not submit to released game channels.
+     std::scoped_lock queue_lock{scheduler.submit_mutex};
+     void(device.GetLogical().WaitIdle());
+-    neural_rendering.reset();
++    ResetNeuralRendering();
+     const auto &api = Ngx::GetApi();
+     if (feature)
+         api.release(feature);
+@@ -169,7 +207,7 @@
+         if (neural_rendering) {
+             scheduler.Finish();
+             std::scoped_lock queue_lock{scheduler.submit_mutex};
+-            neural_rendering.reset();
++            ResetNeuralRendering();
+         }
+         CreateOutput(in.upscale_size);
+         render_extent = in.render_size;
+@@ -179,11 +217,16 @@
+     depth_inverted = in.depth_inverted;
+     quality_mode = neural_options.quality;
+     model_preset = neural_options.preset;
++    const auto& diagnostic = NR::NeuralDiagnosticOptions();
+     const auto neural_mode = neural_options.neural_rendering;
+     const bool requested = device.SupportsNeuralRendering() &&
+-                           neural_mode != Settings::NeuralRendering::Off;
+-    const auto neural_style = requested ? static_cast<NR::Style>(static_cast<u32>(neural_mode) - 1)
+-                                       : NR::Style::Standard;
++                           (diagnostic.enabled || neural_mode != Settings::NeuralRendering::Off);
++    const auto neural_style = neural_mode != Settings::NeuralRendering::Off
++                                  ? static_cast<NR::Style>(static_cast<u32>(neural_mode) - 1)
++                                  : NR::Style::Standard;
++    if (diagnostic.enabled && !device.SupportsNeuralRendering()) {
++        NR::ReportFailure("NR diagnostic refused: device lacks neural rendering features");
++    }
+     const bool hdr = in.hdr && EnvInt("EDEN_NX2_DLSS_HDR", 1) != 0;
+     const bool auto_exposure = in.hdr && EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0;
+     const auto preset = PresetFor(neural_options.preset);
+@@ -368,7 +411,47 @@
+                 frame.hdr = in.hdr;
+                 frame.motion_scale = {in.motion_vector_scale[0] / in.render_size.width,
+                                       in.motion_vector_scale[1] / in.render_size.height};
++                const auto& diagnostic = NR::NeuralDiagnosticOptions();
++                if (diagnostic.enabled) {
++                    frame.style = static_cast<NR::Style>(diagnostic.style.value_or(
++                        static_cast<unsigned>(frame.style)));
++                    frame.intensity = diagnostic.intensity.value_or(frame.intensity);
++                    frame.tone = diagnostic.tone.value_or(frame.tone);
++                    frame.structure = diagnostic.structure.value_or(frame.structure);
++                    frame.auto_mask = diagnostic.auto_mask.value_or(true);
++                    if (neural_diagnostic_frames == 0) {
++                        LOG_INFO(Render_Vulkan,
++                            "NR DIAGNOSTIC active: style={} intensity={} local_tone={} "
++                            "structure={} auto_mask={} skin=-1 passes={} processing={}x{} "
++                            "output={}x{} input_hdr={} resample={} independent_histories=true; "
++                            "GlobalTone unsupported; UI correction unavailable; health_check_every={}",
++                            static_cast<unsigned>(frame.style), frame.intensity, frame.tone,
++                            frame.structure, frame.auto_mask, diagnostic.passes,
++                            neural_extent.width, neural_extent.height,
++                            in.upscale_size.width, in.upscale_size.height, frame.hdr,
++                            neural_image ? "Vulkan linear" : "none", diagnostic.check_every);
++                    }
++                }
++                if (neural_image) {
++                    if (!neural_image_initialized) {
++                        DiagnosticTransition(cmdbuf, *neural_image, VK_IMAGE_LAYOUT_UNDEFINED,
++                                             VK_IMAGE_LAYOUT_GENERAL);
++                        neural_image_initialized = true;
++                    }
++                    DiagnosticBlit(cmdbuf, *output_image, in.upscale_size,
++                                   *neural_image, neural_extent);
++                }
+                 neural_rendering->Record(*cmdbuf, frame);
++                for (auto& pass : neural_extra_passes) {
++                    // Each backend owns its temporal history. The color is passed in place;
++                    // normalized motion sampling uses the original game's motion view.
++                    pass->Record(*cmdbuf, frame);
++                }
++                if (neural_image) {
++                    DiagnosticBlit(cmdbuf, *neural_image, neural_extent,
++                                   *output_image, in.upscale_size);
++                }
++                ++neural_diagnostic_frames;
+                 NR::ReportFrame();
+             }
+         });
+@@ -387,13 +470,16 @@
+             // Drain recorded uses before freeing the backend or clearing its status.
+             scheduler.Finish();
+             std::scoped_lock queue_lock{scheduler.submit_mutex};
+-            neural_rendering.reset();
++            ResetNeuralRendering();
+             neural_motion_view = VK_NULL_HANDLE;
+             NR::ReportInactive();
+         }
+     }
++    const auto& diagnostic = NR::NeuralDiagnosticOptions();
++    const bool check_timeout = diagnostic.enabled && diagnostic.check_every &&
++                               ++neural_diagnostic_checks % diagnostic.check_every == 0;
+     if (!neural_requested || neural_failed ||
+-        (neural_rendering && neural_motion_view == in.motion_vectors.view)) {
++        (neural_rendering && neural_motion_view == in.motion_vectors.view && !check_timeout)) {
+         return;
+     }
+     // The backend uploads model constants during construction. Finish before touching its queue
+@@ -406,11 +492,29 @@
+     // and their device-idle waits under the same lock, after Finish has released the worker.
+     std::scoped_lock queue_lock{scheduler.submit_mutex};
+     try {
++        if (diagnostic.enabled && !diagnostic.error.empty()) {
++            throw std::runtime_error("NR DIAGNOSTIC invalid: " + diagnostic.error);
++        }
+         if (neural_rendering) {
+             if (neural_rendering->HadTimeout()) {
+                 throw std::runtime_error("a neural rendering kernel timed out");
+             }
+-            neural_rendering->Rebind(*output_image, *output_view, in.motion_vectors.view);
++            for (const auto& pass : neural_extra_passes) {
++                if (pass->HadTimeout())
++                    throw std::runtime_error("a diagnostic neural rendering pass timed out");
++            }
++            const VkImage color = neural_image ? *neural_image : *output_image;
++            const VkImageView view = neural_view ? *neural_view : *output_view;
++            if (neural_motion_view != in.motion_vectors.view) {
++                neural_rendering->Rebind(color, view, in.motion_vectors.view);
++                for (auto& pass : neural_extra_passes)
++                    pass->Rebind(color, view, in.motion_vectors.view);
++            }
++            if (check_timeout) {
++                LOG_INFO(Render_Vulkan, "NR DIAGNOSTIC completed={} frames; all {} passes "
++                         "timeout-free (GPU drained for periodic health check)",
++                         neural_diagnostic_frames, diagnostic.passes);
++            }
+         } else {
+             const auto model = NR::UserFolder();
+             if (!neural_model_verified && !NR::IsInstalled(model)) {
+@@ -418,20 +522,94 @@
+                     "import the supported neural rendering model in Graphics settings");
+             }
+             neural_model_verified = true;
++            neural_extent = in.upscale_size;
++            if (diagnostic.enabled && diagnostic.height) {
++                if (uint64_t{in.upscale_size.width} * 9 != uint64_t{in.upscale_size.height} * 16)
++                    throw std::runtime_error("NR diagnostic forced extent requires 16:9 SR output");
++                neural_extent = {diagnostic.height * 16 / 9, diagnostic.height};
++                if (neural_extent.width != in.upscale_size.width ||
++                    neural_extent.height != in.upscale_size.height)
++                    CreateDiagnosticImage(neural_extent);
++            }
++            const VkImage color = neural_image ? *neural_image : *output_image;
++            const VkImageView view = neural_view ? *neural_view : *output_view;
+             neural_rendering = std::make_unique<NR::Backend>(
+                 device.GetInstance(), device.GetPhysical(), *device.GetLogical(),
+-                device.GetGraphicsFamily(), model, in.upscale_size, *output_image, *output_view,
++                device.GetGraphicsFamily(), model, neural_extent, color, view,
+                 in.motion_vectors.view);
++            for (unsigned i = 1; diagnostic.enabled && i < diagnostic.passes; ++i) {
++                neural_extra_passes.push_back(std::make_unique<NR::Backend>(
++                    device.GetInstance(), device.GetPhysical(), *device.GetLogical(),
++                    device.GetGraphicsFamily(), model, neural_extent, color, view,
++                    in.motion_vectors.view));
++            }
+             LOG_INFO(Render_Vulkan, "Native FP8 neural rendering ready: {}x{}",
+                      in.upscale_size.width, in.upscale_size.height);
+             NR::ReportReady();
+         }
+         neural_motion_view = in.motion_vectors.view;
+     } catch (const std::exception& error) {
+-        neural_rendering.reset();
++        ResetNeuralRendering();
+         neural_failed = true;
+         NR::ReportFailure(error.what());
+-    }
++        if (diagnostic.enabled)
++            LOG_ERROR(Render_Vulkan, "NR DIAGNOSTIC FAILED: {}; case is invalid, plain SR only",
++                      error.what());
++    }
++}
++
++void NvidiaDlssUpscaler::ResetNeuralRendering() {
++    // Every caller has drained the GPU and holds submit_mutex. Check sticky timeout
++    // counters here so FPS runs need no periodic queue drains. Do not throw at teardown.
++    if (NR::NeuralDiagnosticOptions().enabled && neural_rendering) {
++        try {
++            bool timeout = neural_rendering->HadTimeout();
++            for (const auto& pass : neural_extra_passes)
++                timeout = pass->HadTimeout() || timeout;
++            if (timeout) {
++                LOG_ERROR(Render_Vulkan, "NR DIAGNOSTIC FAILED final: completed={} frames "
++                          "passes={} kernel_timeout=true; discard this case",
++                          neural_diagnostic_frames, neural_extra_passes.size() + 1);
++                NR::ReportFailure("diagnostic neural rendering kernel timed out");
++            } else {
++                LOG_INFO(Render_Vulkan, "NR DIAGNOSTIC final: completed={} frames; "
++                         "all {} passes timeout-free; kernel_timeout=false",
++                         neural_diagnostic_frames, neural_extra_passes.size() + 1);
++            }
++        } catch (const std::exception& error) {
++            LOG_ERROR(Render_Vulkan, "NR DIAGNOSTIC FAILED final timeout check: {}", error.what());
++        }
++    }
++    neural_extra_passes.clear();
++    neural_rendering.reset();
++    neural_view = {};
++    neural_image = {};
++    neural_image_initialized = false;
++    neural_diagnostic_frames = 0;
++    neural_diagnostic_checks = 0;
++}
++
++void NvidiaDlssUpscaler::CreateDiagnosticImage(VkExtent2D extent) {
++    const auto features = device.GetPhysical().GetFormatProperties(
++        VK_FORMAT_R16G16B16A16_SFLOAT).optimalTilingFeatures;
++    constexpr VkFormatFeatureFlags required = VK_FORMAT_FEATURE_BLIT_SRC_BIT |
++        VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
++    if ((features & required) != required)
++        throw std::runtime_error("RGBA16F linear blit unsupported");
++    neural_image = memory_allocator.CreateImage(VkImageCreateInfo{
++        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = nullptr, .flags = 0,
++        .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R16G16B16A16_SFLOAT,
++        .extent = {extent.width, extent.height, 1}, .mipLevels = 1, .arrayLayers = 1,
++        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
++        .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
++                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .queueFamilyIndexCount = 0,
++        .pQueueFamilyIndices = nullptr, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED});
++    neural_view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
++        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = nullptr, .flags = 0,
++        .image = *neural_image, .viewType = VK_IMAGE_VIEW_TYPE_2D,
++        .format = VK_FORMAT_R16G16B16A16_SFLOAT, .components = {},
++        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}});
+ }
+ 
+ VideoCore::DlssStatus NvidiaDlssUpscaler::Status() {

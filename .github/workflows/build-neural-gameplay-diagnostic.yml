@@ -1,0 +1,187 @@
+name: Build isolated neural gameplay diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_app:
+        description: Also build the separate gameplay AppImage (never a release)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neural-gameplay-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  app:
+    if: inputs.build_app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Apply checked ephemeral diagnostic source
+        run: python3 batocera/neural-diagnostic/prepare.py
+      - name: Identify isolated artifact
+        run: |
+          echo "DLSS_BASE=$(git describe --tags --match 'build-[0-9]*' --abbrev=0)" >> "$GITHUB_ENV"
+          echo "DLSS_TAG=nr-diagnostic-${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "DLSS_SOURCE=$GITHUB_SHA" >> "$GITHUB_ENV"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev libxkbcommon-x11-0 mesa-common-dev \
+            nasm ninja-build qt6-base-private-dev qt6-charts-dev qt6-tools-dev \
+            libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev \
+            libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev libopus-dev \
+            libasound2-dev ccache python3-zstandard pipx mesa-vulkan-drivers \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' |
+            sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-23 lld-23
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtcharts qtimageformats
+          cache: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: neural-diagnostic-clang23-${{ runner.os }}-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            neural-diagnostic-clang23-${{ runner.os }}-
+            batocera-dlss-clang23-${{ runner.os }}-
+      - name: Verify diagnostic option boundaries
+        run: |
+          clang++-23 -std=c++20 -Wall -Wextra -Werror batocera/neural-diagnostic/test-options.cpp -o "$RUNNER_TEMP/nr-options-test"
+          "$RUNNER_TEMP/nr-options-test"
+      - name: Configure and compile isolated diagnostic and tests
+        run: bash tools/batocera/build-dlss.sh
+      - name: Run unit tests
+        run: ctest --test-dir build/dlss --output-on-failure --no-tests=error --parallel 4
+      - name: Package separate diagnostic AppImage
+        run: |
+          bash tools/batocera/package-dlss.sh
+          python3 batocera/neural-diagnostic/package-metadata.py
+      - name: Retain build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: neural-gameplay-build-logs
+          path: |
+            build/dlss/Testing/Temporary/LastTest.log
+            build/dlss/CMakeFiles/CMakeConfigureLog.yaml
+          retention-days: 7
+      - name: Upload isolated AppImage only
+        uses: actions/upload-artifact@v7
+        with:
+          name: neural-gameplay-diagnostic-linux-x86_64
+          path: |
+            out/lichii-nr-diagnostic-linux-x86_64.AppImage
+            out/build.json
+            out/SHA256SUMS
+            out/README.md
+          if-no-files-found: error
+          retention-days: 7
+
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Apply checked diagnostic adaptation
+        run: python3 batocera/neural-diagnostic/prepare.py
+      - name: Install headless build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev mesa-common-dev nasm ninja-build \
+            libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev \
+            libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev libopus-dev \
+            libasound2-dev libssl-dev pipx
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' |
+            sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-23 lld-23
+      - name: Verify diagnostic option boundaries
+        run: |
+          clang++-23 -std=c++20 -Wall -Wextra -Werror batocera/neural-diagnostic/test-options.cpp -o "$RUNNER_TEMP/nr-options-test"
+          "$RUNNER_TEMP/nr-options-test"
+      - name: Configure without emulator frontends
+        run: |
+          cmake -S . -B build/neural-comparison -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23 \
+            '-DCMAKE_EXE_LINKER_FLAGS=-B/usr/lib/llvm-23/bin -fuse-ld=lld' \
+            -DENABLE_QT=OFF -DLICHII_CMD=OFF \
+            -DLICHII_ROOM=OFF -DLICHII_ROOM_STANDALONE=OFF \
+            -DBUILD_TESTING=ON -DLICHII_TESTS=ON -DDYNARMIC_TESTS=OFF \
+            -DLICHII_USE_BUNDLED_SDL3=ON -DLICHII_USE_BUNDLED_OPENSSL=OFF \
+            -DOpenSSL_FORCE_SYSTEM=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DENABLE_NVIDIA_DLSS=ON -DENABLE_UPDATE_CHECKER=OFF \
+            -DUSE_DISCORD_PRESENCE=OFF
+      - name: Build comparison tool only
+        run: cmake --build build/neural-comparison --target neural_rendering_smoke --parallel 4
+      - name: Package offline tool only
+        run: |
+          set -euo pipefail
+          mkdir -p out/neural-offline
+          install -m 755 build/neural-comparison/bin/neural_rendering_smoke out/neural-offline/neural_image_benchmark
+          ldd out/neural-offline/neural_image_benchmark | tee out/neural-offline/DEPENDENCIES.txt
+          if grep -q 'not found' out/neural-offline/DEPENDENCIES.txt; then exit 1; fi
+          status=0
+          out/neural-offline/neural_image_benchmark > out/neural-offline/USAGE.txt 2>&1 || status=$?
+          test "$status" -eq 2
+          cp batocera/neural-diagnostic/README.md out/neural-offline/
+          cp LICENSE.txt externals/opendlss-nr/NOTICE externals/opendlss-nr/UPSTREAM.json out/neural-offline/
+          cp externals/opendlss-nr/LICENSE out/neural-offline/OpenDLSS-NR-LICENSE.txt
+          cp externals/opendlss-nr/volk/LICENSE.md out/neural-offline/Volk-LICENSE.txt
+          printf 'Source: %s\nRun: %s/actions/runs/%s\n' "$GITHUB_SHA" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > out/neural-offline/BUILD.txt
+          sha256sum batocera/neural-diagnostic/runtime.patch batocera/neural-diagnostic/options.h \
+            src/tests/video_core/neural_rendering_smoke.cpp >> out/neural-offline/BUILD.txt
+          tar -czf out/neural-offline-linux-x86_64.tar.gz -C out/neural-offline .
+          (cd out && sha256sum neural-offline-linux-x86_64.tar.gz > neural-offline-linux-x86_64.sha256)
+      - name: Upload offline tool before AppImage completes
+        uses: actions/upload-artifact@v7
+        with:
+          name: neural-cinematic-offline-linux-x86_64
+          path: |
+            out/neural-offline-linux-x86_64.tar.gz
+            out/neural-offline-linux-x86_64.sha256
+          if-no-files-found: error
+          retention-days: 7
