@@ -1,7 +1,7 @@
 # Game-DLSS replacement
 
 The Vulkan renderer can replace a recognized game-DLSS evaluation with NVIDIA DLSS on
-Windows, then AMD FSR 3.1.6 if NVIDIA DLSS is disabled or unavailable. FSR uses AMD's
+Windows or Linux, then AMD FSR 3.1.6 if NVIDIA DLSS is disabled or unavailable. FSR uses AMD's
 eight temporal-upscaling passes, including depth, motion, history and optional RCAS.
 This is separate from the presentation filters that scale the finished window image.
 
@@ -39,7 +39,7 @@ and should remain private. No shaders are skipped or game files changed by this 
 
 The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) has no DLSS of its own. Its
 end-of-frame upscale pass can be replaced with FSR 3.1 on Linux or Windows, on any supported
-Vulkan GPU, or NVIDIA DLSS on Windows. The **Use AMD FSR 3.1 upscaling in Ocarina of Time**
+Vulkan GPU, or NVIDIA DLSS on Windows or Linux. The **Use AMD FSR 3.1 upscaling in Ocarina of Time**
 setting (`ocarina_fsr`) is off by default. NVIDIA DLSS takes precedence when its setting is
 enabled and the runtime is available; FSR runs only when its own setting is on, so without it
 the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
@@ -153,9 +153,14 @@ temporal upscaling takes precedence because it replaces the same output pass.
 
 ## Settings and comparison runs
 
-"Use NVIDIA DLSS in place of a game's DLSS" defaults to off and takes effect when the game
-starts. Disabled means no NVIDIA runtime is loaded; an explicitly selected temporal
-replacement uses FSR 3.1. Missing DLLs and unsupported GPUs fall back to FSR. Recording is
+"Use NVIDIA DLSS in place of a game's DLSS" defaults to off. On Linux, it can be changed
+during gameplay with Apply, including when the session started with DLSS disabled. Install
+the NVIDIA runtime files before launching: NGX and its Vulkan device features are prepared
+at startup, while DLSS evaluation follows the live setting. Ocarina changes backend between
+frames, finishes outstanding work before releasing its resources, and resets temporal history.
+On Windows, the checkbox remains a startup setting and disabling it skips runtime loading.
+An explicitly selected temporal replacement uses FSR 3.1 when NVIDIA DLSS is disabled.
+Missing runtime files and unsupported GPUs fall back to FSR. Recording is
 asynchronous. A failed DLSS recording clears that frame's output, restores input layouts,
 and makes later evaluations fall back; it does not wait for the scheduler worker.
 

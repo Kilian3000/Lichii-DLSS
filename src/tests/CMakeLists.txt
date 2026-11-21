@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
+    video_core/neural_rendering_model.cpp
     common/addon_config.cpp
     common/thread_worker.cpp
     video_core/vulkan_overlay_filter.cpp
@@ -387,6 +388,12 @@ if ((HAS_NCE AND LINUX) OR HAS_HYPERVISOR)
         arm_cpu_guest_dynarmic arm_cpu_guest_${native_backend}_fault
         arm_cpu_guest_${native_backend}_permission_fault
         PROPERTIES LABELS arm_cpu_guest RESOURCE_LOCK arm_cpu_guest TIMEOUT 35)
+endif()
+
+if (ENABLE_NVIDIA_DLSS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ngx_smoke EXCLUDE_FROM_ALL video_core/ngx_smoke.cpp)
+    target_link_libraries(ngx_smoke PRIVATE video_core core common frontend_common ${PLATFORM_LIBRARIES})
+    target_include_directories(ngx_smoke PRIVATE $<TARGET_PROPERTY:video_core,INCLUDE_DIRECTORIES>)
 endif()
 
 add_executable(profile_migration_tests
