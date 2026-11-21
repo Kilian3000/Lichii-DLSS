@@ -1,6 +1,15 @@
 name: Build Batocera DLSS
 
 on:
+  push:
+    branches: [batocera-dlss]
+    paths:
+      - src/**
+      - CMakeModules/**
+      - CMakeLists.txt
+      - externals/**
+      - tools/batocera/**
+      - .github/workflows/build-dlss.yml
   workflow_dispatch:
     inputs:
       merge_upstream:
