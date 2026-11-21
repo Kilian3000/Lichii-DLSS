@@ -71,6 +71,18 @@ updating the underlying settings enums. Tests cover frontend precedence, prefere
 restoration, interrupted-session recovery, and enum compatibility with the emulator.
 The optional GPU smoke command is documented in `docs/user/DLSSLinux.md`.
 
+Revision 4 was validated on RTX 4070 SUPER / NVIDIA 620.70.06: all 15 CTest
+groups and four integration checks passed, as did the real-SR GPU suite and NR
+control suites at scales 1 and 4, each across three device lifecycles. The NR
+suite uses fixed scene pixels after successful NGX evaluation to isolate neural
+history/reset/blend assertions; the separate no-model suite retains genuine SR
+output/history coverage. Ocarina loaded an existing save through the frontend's
+Natural + Native DLAA choices, initialized neural processing at 1920×1080 and
+closed cleanly with the model active. Its renderer preferences were restored on
+exit; the normal official binary/updater and shared save/controller paths were
+verified unchanged. Approximate gameplay samples were 30 FPS with NR at 1440p,
+37–42 FPS with NR at 1080p, and 52–60 FPS with ordinary DLSS, depending on scene.
+
 ## Building and maintaining the fork
 
 Use **Actions → Build Batocera DLSS → Run workflow**. To incorporate a newer official
