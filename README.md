@@ -1,3 +1,22 @@
+# Lichii DLSS for Batocera
+
+Experimental Linux NVIDIA DLSS/DLAA integration, kept separate from official Lichii.
+Based on Lichii build 366 and myshadowww's [native Linux DLSS integration](https://github.com/zortos293/Lichii/pull/840).
+The normal Lichii build and its automatic updates remain independent.
+
+Builds are available under this fork's Releases. NVIDIA runtime/model files are obtained separately;
+this repository does not provide games, keys, firmware or user data. DLSS works only with supported
+game upscaling passes. Optional neural rendering is disabled by default.
+
+For later updates, run **Actions → Build Batocera DLSS** with **Merge a newer official Lichii release**
+enabled and an official `build-N` tag or `latest`. Merge conflicts, failed builds or failed tests stop
+publication, preserving the previously published working package. A successful build records its
+upstream release and exact source commit. Actual GPU/gameplay validation is still required.
+
+The original project documentation follows.
+
+---
+
 <!--
 # SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later

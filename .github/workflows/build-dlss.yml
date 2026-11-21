@@ -1,0 +1,122 @@
+name: Build Batocera DLSS
+
+on:
+  workflow_dispatch:
+    inputs:
+      merge_upstream:
+        description: Merge a newer official Lichii release before building
+        type: boolean
+        default: false
+      upstream_ref:
+        description: Official release tag, or latest
+        type: string
+        default: latest
+
+permissions:
+  contents: write
+
+concurrency:
+  group: batocera-dlss
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Merge requested official release
+        if: inputs.merge_upstream
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref="$UPSTREAM_REF"
+          if [ "$ref" = latest ]; then
+            ref=$(gh api repos/zortos293/Lichii/releases/latest --jq .tag_name)
+          fi
+          [[ "$ref" =~ ^build-[0-9]+$ ]] || { echo 'Use an official build-N release tag'; exit 1; }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --filter=blob:none https://github.com/zortos293/Lichii.git "refs/tags/$ref"
+          git merge --no-ff --no-edit FETCH_HEAD
+      - name: Set build identity
+        run: |
+          set -euo pipefail
+          base=$(git describe --tags --match 'build-[0-9]*' --abbrev=0)
+          echo "DLSS_BASE=$base" >> "$GITHUB_ENV"
+          echo "DLSS_TAG=dlss-$base-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "DLSS_SOURCE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev libxkbcommon-x11-0 mesa-common-dev \
+            nasm ninja-build qt6-base-private-dev qt6-charts-dev qt6-tools-dev \
+            libavfilter-dev libavcodec-dev libswscale-dev pkg-config zlib1g-dev \
+            libva-dev libvdpau-dev spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev libopus-dev \
+            libasound2-dev ccache python3-zstandard pipx mesa-vulkan-drivers \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' |
+            sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-23 lld-23
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtcharts qtimageformats
+          cache: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: batocera-dlss-clang23-${{ runner.os }}-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: batocera-dlss-clang23-${{ runner.os }}-
+      - name: Configure and compile DLSS release and tests
+        run: bash tools/batocera/build-dlss.sh
+      - name: Run unit tests
+        run: ctest --test-dir build/dlss --output-on-failure --no-tests=error --parallel 4
+      - name: Package self-contained AppImage
+        run: bash tools/batocera/package-dlss.sh
+      - name: Retain build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-diagnostics
+          path: |
+            build/dlss/Testing/Temporary/LastTest.log
+            build/dlss/CMakeFiles/CMakeConfigureLog.yaml
+          retention-days: 7
+      - name: Publish tested build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/batocera-dlss"
+          gh release create "$DLSS_TAG" \
+            --target "$DLSS_SOURCE" --prerelease \
+            --title "Lichii DLSS — $DLSS_BASE (${GITHUB_RUN_NUMBER})" \
+            --notes-file out/release-notes.txt \
+            out/lichii-dlss-linux-x86_64-pgo.AppImage out/SHA256SUMS out/build.json
