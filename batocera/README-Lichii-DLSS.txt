@@ -49,6 +49,28 @@ over 1,500 successful native DLSS evaluations at 1920x1080 -> 2560x1440, Quality
 This confirms working upscaling; image-quality and smoothness preferences still
 need a personal comparison. DLSS does not precompile unknown game shaders.
 
+Per-game frame generation
+
+Advanced Game Options > FRAME GENERATION is available with both lichii and
+lichii-dlss: Off, 2x, 3x or 4x. Auto inherits Batocera's global, system and folder
+choices, then the emulator's existing preference. To change only Ocarina, choose
+it in that game's Advanced Game Options rather than the system options.
+
+These choices use Lichii's built-in Optical Flow frame generation, which supports
+Linux in the original official build. The official auto-updating Lichii can use
+it; the custom build is needed for the native Linux DLSS/neural additions, not
+for this optical-flow option. Generated frames improve presentation smoothness
+but do not increase the game's simulation speed. A matching high-refresh display
+or stream is needed to show the extra frames.
+
+2x/3x/4x selects a fixed multiplier with automatic target-rate control disabled.
+Off only disables frame generation and keeps its other preferences. On normal
+Lichii this bridge applies only frame-generation keys; experimental neural and
+DLSS choices are ignored. With Auto and no inherited choice, it changes nothing.
+Temporary choices are restored on exit. Opening either Lichii settings launcher
+also recovers an interrupted override before displaying its settings. Controller
+sharing remains specific to the experimental fork. The normal updater is unchanged.
+
 Per-game neural rendering and comparison
 
 With lichii-dlss selected, Advanced Game Options now includes:
@@ -66,10 +88,12 @@ Native DLAA processes the game's render resolution rather than upscaling first;
 this can reduce neural GPU work. Other quality modes depend on the game's sizes
 and can fall back automatically when unsupported.
 
-On the RTX 4070 SUPER, brief Ocarina Hyrule Field measurements were approximately
-52 FPS with ordinary DLSS, 30 FPS with Natural at 1440p, and 37 FPS with Natural
-at 1080p Native DLAA. These are scene-dependent samples. Choose the look and
-smoothness you prefer; neural rendering does not remove shader compilation pauses.
+On the RTX 4070 SUPER, matched Hyrule Field measurements averaged about 60 FPS
+with neural rendering Off, 41 FPS with Natural at 1080p Native DLAA, and 33 FPS
+with Natural at 1440p. The official Linux build also produced 60 real plus 60
+generated frames per second with Optical Flow 2x and 1080p/120 Hz output.
+These are scene-dependent samples. Frame generation and neural rendering do not
+remove shader compilation pauses.
 
 The global neural default is Off. Per-game Batocera choices temporarily override
 only the selected renderer settings. The launcher restores the emulator's own

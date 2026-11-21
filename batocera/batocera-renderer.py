@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply frontend neural choices for one session; restore emulator preferences on exit."""
+"""Apply frontend renderer choices for one session; restore emulator preferences on exit."""
 from pathlib import Path
 import json
 import os
@@ -9,22 +9,30 @@ import sys
 STYLE_KEY = 'lichii_dlss_neural'
 STRENGTH_KEY = 'lichii_dlss_neural_strength'
 QUALITY_KEY = 'lichii_dlss_quality'
+FRAME_GENERATION_KEY = 'lichii_frame_generation'
+FRAME_GENERATION = {'off', '2', '3', '4'}
 STYLES = {'off': '0', 'standard': '1', 'natural': '2', 'cinematic': '3'}
 QUALITIES = {'game': '0', 'native': '1', 'quality': '2', 'balanced': '3',
              'performance': '4', 'ultra': '5'}
 STRENGTHS = {'25', '50', '75', '100'}
 STATE = '.batocera-neural-overrides.json'
-ALLOWED = {'neural_rendering', 'neural_rendering_strength', 'nvidia_dlss', 'nvidia_dlss_quality'}
+ALLOWED = {'neural_rendering', 'neural_rendering_strength', 'nvidia_dlss', 'nvidia_dlss_quality',
+           'frame_gen', 'frame_gen_type', 'frame_gen_multiplier', 'frame_gen_target_rate'}
 
 
-def resolve(load_all, rom):
+def resolve(load_all, rom, emulator='lichii-dlss'):
     """Use Batocera's normal global/system/folder/game precedence and Auto inheritance."""
+    if emulator not in ('lichii', 'lichii-dlss'):
+        raise ValueError('Unsupported renderer-settings emulator')
+    keys = {FRAME_GENERATION_KEY}
+    if emulator == 'lichii-dlss':
+        keys.update((STYLE_KEY, STRENGTH_KEY, QUALITY_KEY))
     game = Path(rom).name.replace('=', '').replace('#', '')
     result = {}
     for prefix in ('global', 'switch2', f'switch2.folder["{Path(rom).parent}"]',
                    f'switch2["{game}"]'):
         for key, value in load_all(prefix).items():
-            if key in (STYLE_KEY, STRENGTH_KEY, QUALITY_KEY) and value not in ('', 'auto', 'default'):
+            if key in keys and value not in ('', 'auto', 'default'):
                 result[key] = value
     style, strength = result.get(STYLE_KEY), result.get(STRENGTH_KEY)
     if style is not None and style not in STYLES:
@@ -43,6 +51,14 @@ def resolve(load_all, rom):
         updates['neural_rendering_strength'] = strength
     if quality is not None:
         updates['nvidia_dlss_quality'] = QUALITIES[quality]
+    frame_generation = result.get(FRAME_GENERATION_KEY)
+    if frame_generation is not None:
+        if frame_generation not in FRAME_GENERATION:
+            raise ValueError('Invalid Batocera frame-generation choice')
+        updates['frame_gen'] = 'false' if frame_generation == 'off' else 'true'
+        if frame_generation != 'off':
+            updates.update(frame_gen_type='1', frame_gen_multiplier=frame_generation,
+                           frame_gen_target_rate='0')
     return updates
 
 
@@ -100,10 +116,10 @@ def restore(root):
     for entry in entries:
         path = root/entry['path']
         if path.parent not in (root, root/'custom') or path.suffix != '.ini':
-            raise ValueError('Unexpected neural-settings recovery path')
+            raise ValueError('Unexpected renderer-settings recovery path')
         for key in entry['original']:
             if key.split('\\', 1)[0] not in ALLOWED:
-                raise ValueError('Unexpected neural-settings recovery key')
+                raise ValueError('Unexpected renderer-settings recovery key')
         if path.exists():
             write_keys(path, entry['original'])
     state.unlink()
@@ -144,10 +160,11 @@ def main():
     elif action == 'apply':
         from configgen.settings.unixSettings import UnixSettings
         settings = UnixSettings('/userdata/system/batocera.conf')
-        updates = resolve(settings.load_all, sys.argv[3])
+        emulator = sys.argv[4] if len(sys.argv) > 4 else 'lichii-dlss'
+        updates = resolve(settings.load_all, sys.argv[3], emulator)
         apply(root, updates)
         if updates:
-            print('Batocera DLSS session preferences:', json.dumps(updates), flush=True)
+            print('Batocera renderer session preferences:', json.dumps(updates), flush=True)
     else:
         raise ValueError('Unknown renderer-settings action')
 

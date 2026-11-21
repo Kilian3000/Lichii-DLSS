@@ -44,21 +44,27 @@ if [[ "$emulator" == lichii ]]; then
         config_name=lichii
     fi
 fi
-config_file="$XDG_CONFIG_HOME/$config_name/qt-config.ini"
+config_root="$XDG_CONFIG_HOME/$config_name"
+config_file="$config_root/qt-config.ini"
 python3 "$common_dir/sync-library.py" "$config_file"
 controller_family="$emulator"
 normal_config="$common_dir/profile/config/lichii/qt-config.ini"
-sync_shared_controls_back() {
+restore_session_preferences() {
+    if [[ "$emulator" == lichii || "$emulator" == lichii-dlss ]]; then
+        python3 "$common_dir/batocera-renderer.py" restore "$config_root"
+    fi
     if [[ "$emulator" == lichii-dlss ]]; then
-        python3 "$common_dir/batocera-renderer.py" restore "$XDG_CONFIG_HOME/lichii"
         python3 "$common_dir/sync-controller-config.py" "$config_file" "$normal_config"
     fi
 }
+if [[ "$emulator" == lichii || "$emulator" == lichii-dlss ]]; then
+    # Recover interrupted overrides before a game or F1 settings opens.
+    python3 "$common_dir/batocera-renderer.py" restore "$config_root"
+    trap restore_session_preferences EXIT
+fi
 if [[ "$emulator" == lichii-dlss ]]; then
-    python3 "$common_dir/batocera-renderer.py" restore "$XDG_CONFIG_HOME/lichii"
     python3 "$common_dir/sync-controller-config.py" "$normal_config" "$config_file"
     controller_family=lichii
-    trap sync_shared_controls_back EXIT
 fi
 python3 /userdata/system/streaming-control/switch2-session.py "$controller_family" "$config_file"
 # Use the same default audio device as Batocera and Sunshine.
@@ -91,8 +97,8 @@ if [[ ! -f "$rom" ]]; then
     exit 2
 fi
 
-if [[ "$emulator" == lichii-dlss ]]; then
-    python3 "$common_dir/batocera-renderer.py" apply "$XDG_CONFIG_HOME/lichii" "$settings_rom"
+if [[ "$emulator" == lichii || "$emulator" == lichii-dlss ]]; then
+    python3 "$common_dir/batocera-renderer.py" apply "$config_root" "$settings_rom" "$emulator"
 fi
 
 cursor_shown=false
@@ -105,7 +111,7 @@ cleanup() {
     if "$cursor_shown"; then
         batocera-mouse hide >/dev/null 2>&1 || true
     fi
-    sync_shared_controls_back
+    restore_session_preferences
 }
 trap cleanup EXIT
 
