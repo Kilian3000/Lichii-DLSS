@@ -1136,15 +1136,18 @@ bool Device::EnableNeuralRendering() {
         nr_sm.pNext = nullptr;
         return unavailable("the GPU cannot execute the FP8 neural rendering kernels");
     }
-    // Reuse the renderer's float8 feature node. FSR 4 also owns this structure, and Vulkan
-    // permits only one node of its type in the device-creation chain.
+    // FSR 4 already owns both nodes in the renderer's chain. Removing an extension clears
+    // its feature bits but keeps the node linked, so reuse it instead of adding a duplicate.
     features.shader_float8.shaderFloat8 = nr_float8.shaderFloat8;
     features.shader_float8.shaderFloat8CooperativeMatrix = nr_float8.shaderFloat8CooperativeMatrix;
     extensions.shader_float8 = true;
-    nr_cooperative_matrix.pNext = &nr_clock;
+    void* const matrix_next = features.cooperative_matrix2.pNext;
+    features.cooperative_matrix2 = nr_cooperative_matrix;
+    features.cooperative_matrix2.pNext = matrix_next;
+    extensions.cooperative_matrix2 = true;
     // Only now modify the renderer's enabled feature chain; failed probes leave it unchanged.
     nr_sm.pNext = features2.pNext;
-    features2.pNext = &nr_cooperative_matrix;
+    features2.pNext = &nr_clock;
     features.pipeline_executable_properties.pipelineExecutableInfo = VK_TRUE;
     loaded_extensions.insert(required_extensions.begin(), required_extensions.end());
     LOG_INFO(Render_Vulkan, "Native FP8 neural rendering device features enabled");
