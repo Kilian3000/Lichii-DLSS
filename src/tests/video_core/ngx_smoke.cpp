@@ -122,6 +122,7 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
     static VkExtent2D observed_depth_extent;
     static VkExtent2D observed_render_extent;
     static VkOffset2D observed_depth_base;
+    static bool reset_ngx_for_comparison;
     forward_evaluate = evaluate;
     const auto observe_evaluate = [](VkCommandBuffer command, const NVSDK_NGX_Handle* feature,
                                      const NVSDK_NGX_Parameter* parameters,
@@ -141,6 +142,12 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         parameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &base_x);
         parameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &base_y);
         observed_depth_base = {static_cast<int>(base_x), static_cast<int>(base_y)};
+        // Reset only NGX for comparisons that require the same scene input to NR. Its
+        // temporal reconstruction otherwise differs across the resize/Off/HDR sequence.
+        // Inputs::reset stays untouched: NR must still detect style/control changes itself.
+        if (reset_ngx_for_comparison) {
+            const_cast<NVSDK_NGX_Parameter*>(parameters)->Set(NVSDK_NGX_Parameter_Reset, 1);
+        }
         return forward_evaluate(command, feature, parameters, progress);
     };
     SCOPE_EXIT {
@@ -170,7 +177,9 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Off},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
-        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural},
+        // Release NR before the 50% comparison, so both it and the reference use fresh
+        // history/seed rather than comparing a temporal frame with the first frame.
+        Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Off},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 50},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 0},
         Settings::NvidiaDlssRuntimeSettings{Quality::Automatic, Neural::Natural, 0},
@@ -205,6 +214,8 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
         observed_depth_extent = {};
         observed_render_extent = {};
         observed_depth_base = {-1, -1};
+        reset_ngx_for_comparison = expect_neural &&
+            (frame == 2 || frame == 6 || frame == 9 || frame == 12 || frame == 16 || frame == 18);
         api.evaluate = observe_evaluate;
         if (inject_failure) {
             api.evaluate = [](VkCommandBuffer, const NVSDK_NGX_Handle *,
@@ -343,12 +354,26 @@ void RenderCases(const Device& device, u32 scale, bool request_neural, bool expe
                 natural_reset[c] = sums[c] / pixels;
             }
             if (expect_neural && (frame == 6 || frame == 9 || frame == 16 || frame == 18)) {
-                Require(std::abs(sums[c] / pixels - natural_reset[c]) < 0.001,
+                const double difference = std::abs(sums[c] / pixels - natural_reset[c]);
+                if (difference >= 0.001) {
+                    std::fprintf(stderr,
+                        "NR reset mismatch: frame %zu channel %zu actual %.8f reference %.8f "
+                        "difference %.8f (NGX reset only)\n",
+                        frame, c, sums[c] / pixels, natural_reset[c], difference);
+                }
+                Require(difference < 0.001,
                         "Neural adjustment retained old history or differs from a fresh activation");
             }
             if (expect_neural && frame == 12) {
                 const auto halfway = (expected[c] + natural_reset[c]) / 2;
-                Require(std::abs(sums[c] / pixels - halfway) < 0.003,
+                const double difference = std::abs(sums[c] / pixels - halfway);
+                if (difference >= 0.003) {
+                    std::fprintf(stderr,
+                        "NR blend mismatch: frame %zu channel %zu actual %.8f expected %.8f "
+                        "difference %.8f (fresh NR, NGX reset only)\n",
+                        frame, c, sums[c] / pixels, halfway, difference);
+                }
+                Require(difference < 0.003,
                         "50% strength did not blend the original and neural images");
             }
             style_difference += std::abs(sums[c] / pixels - natural_reset[c]);
